@@ -115,7 +115,14 @@ exports.views.tagDictionary.toHtml = function(obj, generateFiles) {
                     if(obj[tag].hasOwnProperty(prop)) {
                         thisTag += '<tr>' + os.EOL;
                         thisTag += '<td class="tags-property-name" id="' + tag + '-' + prop + '-name"><b>' + prop + '</b></td> ';
-                        val = obj[tag][prop];
+                        if(prop === 'synonyms') {
+                            val = '';
+                            obj[tag][prop].forEach(function(sy) {
+                                val += '<a href="tags-' + String(sy) + '.html">@' + sy + '</a>, ';
+                            });
+                        } else {
+                            val = obj[tag][prop];
+                        }
                         tmp = val.toString().trim();
                         tmp = tmp.replace(/\r\n|\n|\r/g, os.EOL);
                         tmp = tmp.replace(/\t/g, '    ');
