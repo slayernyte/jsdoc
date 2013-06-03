@@ -1,11 +1,12 @@
 /*global afterEach: true, beforeEach: true, describe: true, expect: true, env: true, it: true,
-spyOn: true, xdescribe: true */
+jasmine: true, spyOn: true, xdescribe: true */
 var hasOwnProp = Object.prototype.hasOwnProperty;
 
 describe("jsdoc/util/templateHelper", function() {
     var helper = require('jsdoc/util/templateHelper'),
         doclet = require('jsdoc/doclet'),
-        resolver = require('jsdoc/tutorial/resolver');
+        resolver = require('jsdoc/tutorial/resolver'),
+        taffy = require('taffydb').taffy;
     helper.registerLink('test', 'path/to/test.html');
 
     it("should exist", function() {
@@ -86,6 +87,11 @@ describe("jsdoc/util/templateHelper", function() {
     it("should export a 'getAncestorLinks' function", function() {
         expect(helper.getAncestorLinks).toBeDefined();
         expect(typeof helper.getAncestorLinks).toBe("function");
+    });
+
+    it("should export a 'addEventListeners' function", function() {
+        expect(helper.addEventListeners).toBeDefined();
+        expect(typeof helper.addEventListeners).toBe("function");
     });
 
     it("should export a 'prune' function", function() {
@@ -196,6 +202,11 @@ describe("jsdoc/util/templateHelper", function() {
 
             expect( filename1.toLowerCase() ).not.toBe( filename2.toLowerCase() );
         });
+
+        it('should remove variations from the longname before generating the filename', function() {
+            var filename = helper.getUniqueFilename('MyClass(foo, bar)');
+            expect(filename).toBe('MyClass.html');
+        });
     });
 
     describe("longnameToUrl", function() {
@@ -303,6 +314,25 @@ describe("jsdoc/util/templateHelper", function() {
             var link = helper.linkto('http://example.com', 'text');
             expect(link).toBe('<a href="http://example.com">text</a>');
         });
+
+        it('returns a link with a fragment ID if a URL and fragment ID are specified', function() {
+            var link = helper.linkto('LinktoFakeClass', null, null, 'fragment');
+            expect(link).toBe('<a href="fakeclass.html#fragment">LinktoFakeClass</a>');
+        });
+
+        it('returns the original text if an inline {@link} tag is specified', function() {
+            var link;
+            var text = '{@link Foo}';
+
+            function getLink() {
+                link = helper.linkto(text);
+            }
+            
+            // make sure we're not trying to parse the inline link as a type expression
+            expect(getLink).not.toThrow();
+            // linkto doesn't process {@link} tags
+            expect(link).toBe(text);
+        });
     });
 
     describe("htmlsafe", function() {
@@ -328,11 +358,10 @@ describe("jsdoc/util/templateHelper", function() {
             { A: true }
         ];
         var matches = array.slice(0, 3);
-        var taffy = require('taffydb').taffy(array);
         var spec = { number: [1, 2, 3], A: [true, 'maybe'] };
 
         it('should find the requested items', function() {
-            expect( helper.find(taffy, spec) ).toEqual(matches);
+            expect( helper.find(taffy(array), spec) ).toEqual(matches);
         });
     });
 
@@ -379,9 +408,10 @@ describe("jsdoc/util/templateHelper", function() {
             {kind: 'constant'}, // global
             {kind: 'typedef'}, // global
             {kind: 'constant', memberof: 'module:one/two'}, // not global
+            {kind: 'function', name: 'module:foo', longname: 'module:foo'} // not global
         ];
         var array = classes.concat(externals.concat(events.concat(mixins.concat(modules.concat(namespaces.concat(misc))))));
-        var data = require('taffydb').taffy(array);
+        var data = taffy(array);
         var members = helper.getMembers(data);
 
         // check the output object has properties as expected.
@@ -439,7 +469,7 @@ describe("jsdoc/util/templateHelper", function() {
         });
 
         it("globals are detected", function() {
-            compareObjectArrays(misc.slice(0, -1), members.globals);
+            compareObjectArrays(misc.slice(0, -2), members.globals);
         });
     });
 
@@ -717,7 +747,7 @@ describe("jsdoc/util/templateHelper", function() {
             henchman = new doclet.Doclet('/** @class Henchman\n@memberof module:mafia/gangs.Sharks\n@inner */', {}),
             gang = new doclet.Doclet('/** @namespace module:mafia/gangs.Sharks */', {}),
             mafia = new doclet.Doclet('/** @module mafia/gangs */', {}),
-            data = require('taffydb').taffy([lackeys, henchman, gang, mafia]);
+            data = taffy([lackeys, henchman, gang, mafia]);
 
         // register some links
         it("returns an empty array if there are no ancestors", function() {
@@ -774,9 +804,36 @@ describe("jsdoc/util/templateHelper", function() {
         });
     });
 
-    describe("prune", function() {
+    describe("addEventListeners", function() {
+        var doclets = taffy(jasmine.getDocSetFromFile('test/fixtures/listenstag.js').doclets),
+            ev = helper.find(doclets, {longname: 'module:myModule.event:MyEvent'})[0],
+            ev2 = helper.find(doclets, {longname: 'module:myModule~Events.event:Event2'})[0],
+            ev3 = helper.find(doclets, {longname: 'module:myModule#event:Event3'})[0];
+       
+        helper.addEventListeners(doclets);
+        
+        it("adds a 'listeners' array to events with the longnames of the listeners", function() {
+            expect(Array.isArray(ev.listeners)).toBe(true);
+            expect(Array.isArray(ev2.listeners)).toBe(true);
 
-        var taffy = require('taffydb').taffy;
+            expect(ev.listeners.length).toBe(2);
+            expect(ev.listeners).toContain('module:myModule~MyHandler');
+            expect(ev.listeners).toContain('module:myModule~AnotherHandler');
+
+            expect(ev2.listeners.length).toBe(1);
+            expect(ev2.listeners).toContain('module:myModule~MyHandler');
+        });
+
+        it("does not add listeners for events with no listeners", function() {
+            expect(ev3.listeners).not.toBeDefined();
+        });
+
+        it("does not make spurious doclets if something @listens to a non-existent symbol", function() {
+            expect(helper.find(doclets, {longname: 'event:fakeEvent'}).length).toBe(0);
+        });
+    });
+
+    describe("prune", function() {
 
         var array = [
             // keep
@@ -902,7 +959,7 @@ describe("jsdoc/util/templateHelper", function() {
         });
     });
 
-    xdescribe("toTutorial", function() {
+    describe("toTutorial", function() {
         var lenient = !!env.opts.lenient;
 
         function missingParam() {
@@ -934,32 +991,32 @@ describe("jsdoc/util/templateHelper", function() {
         // missing tutorials
         it("returns the tutorial name if it's missing and no missingOpts is provided", function() {
             helper.setTutorials(resolver.root);
-            var link = helper.toTutorial('asdf');
-            expect(link).toBe('asdf');
+            var link = helper.toTutorial('qwerty');
+            expect(link).toBe('qwerty');
         });
 
         it("returns the tutorial name wrapped in missingOpts.tag if provided and the tutorial is missing", function() {
-            var link = helper.toTutorial('asdf', 'lkjklasdf', {tag: 'span'});
-            expect(link).toBe('<span>asdf</span>');
+            var link = helper.toTutorial('qwerty', 'lkjklqwerty', {tag: 'span'});
+            expect(link).toBe('<span>qwerty</span>');
         });
 
         it("returns the tutorial name wrapped in missingOpts.tag with class missingOpts.classname if provided and the tutorial is missing", function() {
-            var link = helper.toTutorial('asdf', 'lkjklasdf', {classname: 'missing'});
-            expect(link).toBe('asdf');
+            var link = helper.toTutorial('qwerty', 'lkjklqwerty', {classname: 'missing'});
+            expect(link).toBe('qwerty');
 
-            link = helper.toTutorial('asdf', 'lkjklasdf', {tag: 'span', classname: 'missing'});
-            expect(link).toBe('<span class="missing">asdf</span>');
+            link = helper.toTutorial('qwerty', 'lkjklqwerty', {tag: 'span', classname: 'missing'});
+            expect(link).toBe('<span class="missing">qwerty</span>');
         });
 
         it("prefixes the tutorial name with missingOpts.prefix if provided and the tutorial is missing", function() {
-            var link = helper.toTutorial('asdf', 'lkjklasdf', {tag: 'span', classname: 'missing', prefix: 'TODO-'});
-            expect(link).toBe('<span class="missing">TODO-asdf</span>');
+            var link = helper.toTutorial('qwerty', 'lkjklqwerty', {tag: 'span', classname: 'missing', prefix: 'TODO-'});
+            expect(link).toBe('<span class="missing">TODO-qwerty</span>');
 
-            link = helper.toTutorial('asdf', 'lkjklasdf', {prefix: 'TODO-'});
-            expect(link).toBe('TODO-asdf');
+            link = helper.toTutorial('qwerty', 'lkjklqwerty', {prefix: 'TODO-'});
+            expect(link).toBe('TODO-qwerty');
 
-            link = helper.toTutorial('asdf', 'lkjklasdf', {prefix: 'TODO-', classname: 'missing'});
-            expect(link).toBe('TODO-asdf');
+            link = helper.toTutorial('qwerty', 'lkjklqwerty', {prefix: 'TODO-', classname: 'missing'});
+            expect(link).toBe('TODO-qwerty');
         });
 
         // now we do non-missing tutorials.
@@ -1258,6 +1315,18 @@ describe("jsdoc/util/templateHelper", function() {
                 url = helper.createLink(mockDoclet);
 
             expect(url).toEqual('_.html#"*foo"');
+        });
+
+        it('should create a url for a function that is the only symbol exported by a module.',
+            function() {
+            var mockDoclet = {
+                kind: 'function',
+                longname: 'module:bar',
+                name: 'module:bar'
+            };
+            var url = helper.createLink(mockDoclet);
+
+            expect(url).toEqual('module-bar.html');
         });
     });
 

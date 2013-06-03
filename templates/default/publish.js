@@ -150,6 +150,33 @@ function generateSourceFiles(sourceFiles) {
 }
 
 /**
+ * Look for classes or functions with the same name as modules (which indicates that the module
+ * exports only that class or function), then attach the classes or functions to the `module`
+ * property of the appropriate module doclets. The name of each class or function is also updated
+ * for display purposes. This function mutates the original arrays.
+ * 
+ * @private
+ * @param {Array.<module:jsdoc/doclet.Doclet>} doclets - The array of classes and functions to
+ * check.
+ * @param {Array.<module:jsdoc/doclet.Doclet>} modules - The array of module doclets to search.
+ */
+function attachModuleSymbols(doclets, modules) {
+    var symbols = {};
+
+    // build a lookup table
+    doclets.forEach(function(symbol) {
+        symbols[symbol.longname] = symbol;
+    });
+
+    return modules.map(function(module) {
+        if (symbols[module.longname]) {
+            module.module = symbols[module.longname];
+            module.module.name = module.module.name.replace('module:', 'require("') + '")';
+        }
+    });
+}
+
+/**
  * Create the navigation sidebar.
  * @param {object} members The members that will be used to create the sidebar.
  * @param {array<object>} members.classes
@@ -164,7 +191,10 @@ function generateSourceFiles(sourceFiles) {
  */
 function buildNav(members) {
     var nav = '<h2><a href="index.html">Index</a></h2>',
-        seen = {};
+        seen = {},
+        hasClassList = false,
+        classNav = '',
+        globalNav = '';
 
     if (members.modules.length) {
         nav += '<h3>Modules</h3><ul>';
@@ -191,25 +221,18 @@ function buildNav(members) {
     }
 
     if (members.classes.length) {
-        var moduleClasses = 0;
         members.classes.forEach(function(c) {
-            var moduleSameName = find({kind: 'module', longname: c.longname});
-            if (moduleSameName.length) {
-                c.name = c.name.replace('module:', 'require("')+'")';
-                moduleClasses++;
-                moduleSameName[0].module = c;
-            }
-            if (moduleClasses !== -1 && moduleClasses < members.classes.length) {
-                nav += '<h3>Classes</h3><ul>';
-                moduleClasses = -1;
-            }
             if ( !hasOwnProp.call(seen, c.longname) ) {
-                nav += '<li>'+linkto(c.longname, c.name)+'</li>';
+                classNav += '<li>'+linkto(c.longname, c.name)+'</li>';
             }
             seen[c.longname] = true;
         });
         
-        nav += '</ul>';
+        if (classNav !== '') {
+            nav += '<h3>Classes</h3><ul>';
+            nav += classNav;
+            nav += '</ul>';
+        }
     }
 
     if (members.events.length) {
@@ -258,15 +281,20 @@ function buildNav(members) {
     }
     
     if (members.globals.length) {
-        nav += '<h3>Global</h3><ul>';
         members.globals.forEach(function(g) {
             if ( g.kind !== 'typedef' && !hasOwnProp.call(seen, g.longname) ) {
-                nav += '<li>'+linkto(g.longname, g.name)+'</li>';
+                globalNav += '<li>' + linkto(g.longname, g.name) + '</li>';
             }
             seen[g.longname] = true;
         });
         
-        nav += '</ul>';
+        if (!globalNav) {
+            // turn the heading into a link so you can actually get to the global page
+            nav += '<h3>' + linkto('global', 'Global') + '</h3>';
+        }
+        else {
+            nav += '<h3>Global</h3><ul>' + globalNav + '</ul>';
+        }
     }
 
     return nav;
@@ -303,6 +331,7 @@ exports.publish = function(taffyData, opts, tutorials) {
 
     data = helper.prune(data);
     data.sort('longname, version, since');
+    helper.addEventListeners(data);
 
     var sourceFiles = {};
     var sourceFilePaths = [];
@@ -351,15 +380,37 @@ exports.publish = function(taffyData, opts, tutorials) {
     }
     fs.mkPath(outdir);
 
-    // copy static files to outdir
-    var fromDir = path.join(templatePath, 'static'),
-        staticFiles = fs.ls(fromDir, 3);
-        
+    // copy the template's static files to outdir
+    var fromDir = path.join(templatePath, 'static');
+    var staticFiles = fs.ls(fromDir, 3);
+
     staticFiles.forEach(function(fileName) {
         var toDir = fs.toDir( fileName.replace(fromDir, outdir) );
         fs.mkPath(toDir);
         fs.copyFileSync(fileName, toDir);
     });
+
+    // copy user-specified static files to outdir
+    var staticFilePaths;
+    var staticFileFilter;
+    var staticFileScanner;
+    if (conf['default'].staticFiles) {
+        staticFilePaths = conf['default'].staticFiles.paths || [];
+        staticFileFilter = new (require('jsdoc/src/filter')).Filter(conf['default'].staticFiles);
+        staticFileScanner = new (require('jsdoc/src/scanner')).Scanner();
+
+        staticFilePaths.forEach(function(filePath) {
+            var extraStaticFiles = staticFileScanner.scan([filePath], 10, staticFileFilter);
+
+            extraStaticFiles.forEach(function(fileName) {
+                var sourcePath = fs.statSync(filePath).isDirectory() ? filePath :
+                    path.dirname(filePath);
+                var toDir = fs.toDir( fileName.replace(sourcePath, outdir) );
+                fs.mkPath(toDir);
+                fs.copyFileSync(fileName, toDir);
+            });
+        });
+    }
     
     if (sourceFilePaths.length) {
         sourceFiles = shortenPaths( sourceFiles, path.commonPrefix(sourceFilePaths) );
@@ -424,6 +475,8 @@ exports.publish = function(taffyData, opts, tutorials) {
 
     // once for all
     view.nav = buildNav(members);
+    attachModuleSymbols( find({ kind: ['class', 'function'], longname: {left: 'module:'} }),
+        members.modules );
 
     // only output pretty-printed source files if requested; do this before generating any other
     // pages, so the other pages can link to the source files
@@ -450,34 +503,32 @@ exports.publish = function(taffyData, opts, tutorials) {
     var mixins = taffy(members.mixins);
     var externals = taffy(members.externals);
     
-    for (var longname in helper.longnameToUrl) {
-        if ( hasOwnProp.call(helper.longnameToUrl, longname) ) {
-            var myClasses = helper.find(classes, {longname: longname});
-            if (myClasses.length) {
-                generate('Class: ' + myClasses[0].name, myClasses, helper.longnameToUrl[longname]);
-            }
-            
-            var myModules = helper.find(modules, {longname: longname});
-            if (myModules.length) {
-                generate('Module: ' + myModules[0].name, myModules, helper.longnameToUrl[longname]);
-            }
-
-            var myNamespaces = helper.find(namespaces, {longname: longname});
-            if (myNamespaces.length) {
-                generate('Namespace: ' + myNamespaces[0].name, myNamespaces, helper.longnameToUrl[longname]);
-            }
-            
-            var myMixins = helper.find(mixins, {longname: longname});
-            if (myMixins.length) {
-                generate('Mixin: ' + myMixins[0].name, myMixins, helper.longnameToUrl[longname]);
-            }
-
-            var myExternals = helper.find(externals, {longname: longname});
-            if (myExternals.length) {
-                generate('External: ' + myExternals[0].name, myExternals, helper.longnameToUrl[longname]);
-            }
+    Object.keys(helper.longnameToUrl).forEach(function(longname) {
+        var myClasses = helper.find(classes, {longname: longname});
+        if (myClasses.length) {
+            generate('Class: ' + myClasses[0].name, myClasses, helper.longnameToUrl[longname]);
         }
-    }
+        
+        var myModules = helper.find(modules, {longname: longname});
+        if (myModules.length) {
+            generate('Module: ' + myModules[0].name, myModules, helper.longnameToUrl[longname]);
+        }
+
+        var myNamespaces = helper.find(namespaces, {longname: longname});
+        if (myNamespaces.length) {
+            generate('Namespace: ' + myNamespaces[0].name, myNamespaces, helper.longnameToUrl[longname]);
+        }
+        
+        var myMixins = helper.find(mixins, {longname: longname});
+        if (myMixins.length) {
+            generate('Mixin: ' + myMixins[0].name, myMixins, helper.longnameToUrl[longname]);
+        }
+
+        var myExternals = helper.find(externals, {longname: longname});
+        if (myExternals.length) {
+            generate('External: ' + myExternals[0].name, myExternals, helper.longnameToUrl[longname]);
+        }
+    });
 
     // TODO: move the tutorial functions to templateHelper.js
     function generateTutorial(title, tutorial, filename) {
